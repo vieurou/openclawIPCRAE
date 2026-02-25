@@ -6,7 +6,9 @@ OpenClaw plugin that integrates an IPCRAE vault into the agent workflow.
 
 - Injects IPCRAE context before prompt build (`before_prompt_build`)
 - Writes a session journal entry on `session_end`
-- Adds `/capture` and `/ipcrae-status` commands
+- Adds `/capture`, `/capture-local`, `/capture-knowledge`, `/promote-note`, `/ipcrae-sync`, and `/ipcrae-status` commands
+- Enforces a write policy gate: stable writes are blocked when CDE mode is degraded
+- Enforces strict Knowledge frontmatter quality for stable writes (required `sources`, validated `domain`/`tags`)
 
 ## Example config
 

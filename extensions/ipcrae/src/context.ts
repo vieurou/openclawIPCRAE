@@ -28,7 +28,7 @@ function truncateText(input: string, maxChars: number): string {
   return `${input.slice(0, Math.max(0, maxChars - 20)).trimEnd()}\n\n[truncated]`;
 }
 
-function normalizeBlock(title: string, body: string | null): string | null {
+function normalizeBlock(title: string, body: string | null | undefined): string | null {
   if (!body) {
     return null;
   }
@@ -55,45 +55,94 @@ function extractProjectSlugFromContext(contextMd: string | null): string | undef
   return match?.[1]?.trim();
 }
 
+function asSlug(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = value.trim().replace(/[^a-zA-Z0-9_-]+/g, "-");
+  return normalized.replace(/^-+|-+$/g, "") || undefined;
+}
+
+async function readStateMetadata(
+  statePath: string,
+  ttlMs: number,
+): Promise<{ domain?: string; projectSlug?: string }> {
+  const raw = await readTextCached(statePath, ttlMs);
+  if (!raw) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      domain: asSlug(parsed.domain),
+      projectSlug: asSlug(parsed.projectSlug),
+    };
+  } catch {
+    return {};
+  }
+}
+
 export type IPCRAEStatusSnapshot = {
   domain?: string;
   projectSlug?: string;
+  contextPath: string;
+  instructionsPath: string;
   phaseIndexPath: string;
   projectTrackingPath?: string;
+  instructionsSummary?: string;
   phaseSummary?: string;
   projectTrackingSummary?: string;
+  cdeMode: "normal" | "degraded";
+  missingRequiredPaths: string[];
 };
 
 export async function readIPCRAEStatusSnapshot(
   config: IPCRAEConfig,
 ): Promise<IPCRAEStatusSnapshot> {
   const contextPath = join(config.ipcraeRoot, ".ipcrae", "context.md");
+  const instructionsPath = join(config.ipcraeRoot, ".ipcrae", "instructions.md");
+  const statePath = join(config.ipcraeRoot, ".ipcrae", "state.json");
   const phaseIndexPath = join(config.ipcraeRoot, "Phases", "index.md");
 
   const contextMd = await readTextCached(contextPath, config.contextCacheTtlMs);
-  const domain = config.domain ?? detectDomain(contextMd);
-  const projectSlug = config.projectSlug ?? extractProjectSlugFromContext(contextMd);
+  const stateMeta = await readStateMetadata(statePath, config.contextCacheTtlMs);
+  const domain = config.domain ?? stateMeta.domain ?? detectDomain(contextMd);
+  const projectSlug =
+    config.projectSlug ?? stateMeta.projectSlug ?? extractProjectSlugFromContext(contextMd);
   const projectTrackingPath = projectSlug
     ? join(config.ipcraeRoot, "Projets", projectSlug, "tracking.md")
     : undefined;
 
-  const [phaseIndex, tracking] = await Promise.all([
+  const [instructions, phaseIndex, tracking] = await Promise.all([
+    readTextCached(instructionsPath, config.contextCacheTtlMs),
     readTextCached(phaseIndexPath, config.contextCacheTtlMs),
     projectTrackingPath ? readTextCached(projectTrackingPath, config.contextCacheTtlMs) : null,
   ]);
 
+  const missingRequiredPaths = [
+    contextMd ? null : contextPath,
+    instructions ? null : instructionsPath,
+    phaseIndex ? null : phaseIndexPath,
+  ].filter((value): value is string => Boolean(value));
+
   return {
     domain,
     projectSlug,
+    contextPath,
+    instructionsPath,
     phaseIndexPath,
     projectTrackingPath,
+    instructionsSummary: instructions ? truncateText(instructions.trim(), 900) : undefined,
     phaseSummary: phaseIndex ? truncateText(phaseIndex.trim(), 900) : undefined,
     projectTrackingSummary: tracking ? truncateText(tracking.trim(), 900) : undefined,
+    cdeMode: missingRequiredPaths.length ? "degraded" : "normal",
+    missingRequiredPaths,
   };
 }
 
 export async function buildIPCRAEContext(config: IPCRAEConfig): Promise<string> {
   const contextPath = join(config.ipcraeRoot, ".ipcrae", "context.md");
+  const instructionsPath = join(config.ipcraeRoot, ".ipcrae", "instructions.md");
   const ruleZeroPath = join(
     config.ipcraeRoot,
     ".ipcrae",
@@ -109,8 +158,9 @@ export async function buildIPCRAEContext(config: IPCRAEConfig): Promise<string> 
   const status = await readIPCRAEStatusSnapshot(config);
   const domain = status.domain;
   const memoryPath = domain ? join(config.ipcraeRoot, "memory", `${domain}.md`) : null;
-  const [ruleZeroMd, domainMemory] = await Promise.all([
+  const [ruleZeroMd, instructionsMd, domainMemory] = await Promise.all([
     readTextCached(ruleZeroPath, config.contextCacheTtlMs),
+    readTextCached(instructionsPath, config.contextCacheTtlMs),
     memoryPath ? readTextCached(memoryPath, config.contextCacheTtlMs) : null,
   ]);
 
@@ -128,6 +178,10 @@ export async function buildIPCRAEContext(config: IPCRAEConfig): Promise<string> 
     normalizeBlock(
       "Rule 0",
       config.contextMode === "compact" ? truncateText(ruleZeroMd ?? "", 1200) : ruleZeroMd,
+    ),
+    normalizeBlock(
+      "Instructions",
+      config.contextMode === "compact" ? truncateText(instructionsMd ?? "", 1200) : instructionsMd,
     ),
     normalizeBlock(
       "Global Context",

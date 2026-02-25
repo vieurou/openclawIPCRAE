@@ -344,6 +344,12 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/ipcrae:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/irc:
     devDependencies:
       openclaw:

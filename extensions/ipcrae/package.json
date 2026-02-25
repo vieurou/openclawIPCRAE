@@ -1,0 +1,14 @@
+{
+  "name": "@openclaw/ipcrae",
+  "version": "2026.2.24",
+  "description": "OpenClaw IPCRAE integration plugin",
+  "type": "module",
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

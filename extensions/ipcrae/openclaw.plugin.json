@@ -1,0 +1,25 @@
+{
+  "id": "ipcrae",
+  "name": "IPCRAE",
+  "description": "Injects IPCRAE vault context, journaling, and capture commands.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "ipcraeRoot": { "type": "string" },
+      "contextMode": { "type": "string", "enum": ["minimal", "compact", "full"] },
+      "autoJournal": { "type": "boolean" },
+      "autoCapture": { "type": "boolean" },
+      "domain": { "type": "string" },
+      "projectSlug": { "type": "string" }
+    }
+  },
+  "uiHints": {
+    "ipcraeRoot": { "label": "IPCRAE Root", "help": "Vault root (ex: ~/IPCRAE)." },
+    "contextMode": { "label": "Context Mode" },
+    "autoJournal": { "label": "Auto Journal" },
+    "autoCapture": { "label": "Auto Capture" },
+    "domain": { "label": "Default Domain" },
+    "projectSlug": { "label": "Project Slug" }
+  }
+}

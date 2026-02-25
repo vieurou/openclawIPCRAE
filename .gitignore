@@ -120,3 +120,5 @@ dist/protocol.schema.json
 
 # Synthing
 **/.stfolder/
+.ipcrae-memory
+.mcp-debug-tools/config.json

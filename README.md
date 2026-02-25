@@ -101,6 +101,9 @@ pnpm install
 pnpm ui:build # auto-installs UI deps on first run
 pnpm build
 
+# Optional: run the local auto-improvement routine
+pnpm auto:improve
+
 pnpm openclaw onboard --install-daemon
 
 # Dev loop (auto-reload on TS changes)

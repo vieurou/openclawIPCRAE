@@ -1,7 +1,15 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { resolveIPCRAEConfig, type IPCRAEConfig } from "./src/config.js";
 import { buildIPCRAEContext, readIPCRAEStatusSnapshot } from "./src/context.js";
-import { captureInbox, writeJournalEntry } from "./src/vault.js";
+import { evaluateIPCRAEWritePolicy } from "./src/policy.js";
+import {
+  captureInbox,
+  writeJournalEntry,
+  promoteLocalNoteToKnowledge,
+  writeKnowledgeNote,
+  writeLocalNote,
+  syncProjectArtifacts,
+} from "./src/vault.js";
 
 const ipcraeConfigSchema = {
   parse(value: unknown): IPCRAEConfig {
@@ -29,17 +37,56 @@ async function safeBuildContext(api: OpenClawPluginApi, config: IPCRAEConfig): P
   }
 }
 
+function buildNextFixes(status: Awaited<ReturnType<typeof readIPCRAEStatusSnapshot>>): string[] {
+  const fixes: string[] = [];
+
+  if (status.missingRequiredPaths.includes(status.contextPath)) {
+    fixes.push(`Create required context file: ${status.contextPath}`);
+  }
+  if (status.missingRequiredPaths.includes(status.instructionsPath)) {
+    fixes.push(`Create required instructions file: ${status.instructionsPath}`);
+  }
+  if (status.missingRequiredPaths.includes(status.phaseIndexPath)) {
+    fixes.push(`Create required phase index file: ${status.phaseIndexPath}`);
+  }
+
+  if (!status.projectSlug) {
+    fixes.push(
+      "Set active project in .ipcrae/state.json (projectSlug) or .ipcrae/context.md (Projet actif).",
+    );
+  }
+
+  if (status.projectTrackingPath && !status.projectTrackingSummary) {
+    fixes.push(`Run /ipcrae-sync to initialize tracking: ${status.projectTrackingPath}`);
+  }
+
+  if (status.cdeMode === "degraded") {
+    fixes.push("Re-run /ipcrae-status after applying the fixes above.");
+  }
+
+  return fixes;
+}
+
 async function safeStatus(api: OpenClawPluginApi, config: IPCRAEConfig): Promise<string> {
   try {
     const status = await readIPCRAEStatusSnapshot(config);
+    const nextFixes = buildNextFixes(status);
+
     return [
       "IPCRAE status:",
       `- root: ${config.ipcraeRoot}`,
       `- contextMode: ${config.contextMode}`,
       `- domain: ${status.domain ?? config.domain ?? "(unknown)"}`,
       `- project: ${status.projectSlug ?? config.projectSlug ?? "(unknown)"}`,
+      `- cdeMode: ${status.cdeMode}`,
+      `- instructions: ${status.instructionsSummary ? "loaded" : `missing (${status.instructionsPath})`}`,
       `- phases: ${status.phaseSummary ? "loaded" : `missing (${status.phaseIndexPath})`}`,
       `- tracking: ${status.projectTrackingSummary ? "loaded" : status.projectTrackingPath ? `missing (${status.projectTrackingPath})` : "n/a"}`,
+      status.missingRequiredPaths.length
+        ? `- missingRequired: ${status.missingRequiredPaths.join(", ")}`
+        : "",
+      nextFixes.length ? `\nNext fixes:\n${nextFixes.map((fix) => `- ${fix}`).join("\n")}` : "",
+      status.instructionsSummary ? `\nInstructions:\n${status.instructionsSummary}` : "",
       status.phaseSummary ? `\nPhase summary:\n${status.phaseSummary}` : "",
       status.projectTrackingSummary ? `\nProject tracking:\n${status.projectTrackingSummary}` : "",
     ]
@@ -102,6 +149,11 @@ const ipcraePlugin = {
           return { text: "Usage: /capture <texte>" };
         }
         try {
+          const status = await readIPCRAEStatusSnapshot(config);
+          const policy = evaluateIPCRAEWritePolicy(status, "volatile");
+          if (!policy.allowed) {
+            return { text: policy.reason ?? "IPCRAE write policy blocked." };
+          }
           const filePath = await captureInbox(config.ipcraeRoot, {
             text,
             channel: ctx.channel,
@@ -112,6 +164,141 @@ const ipcraePlugin = {
         } catch (error) {
           return {
             text: `Capture failed: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      },
+    });
+
+    api.registerCommand({
+      name: "capture-local",
+      description: "Capture volatile implementation notes into .ipcrae-project/local-notes.",
+      acceptsArgs: true,
+      handler: async (ctx) => {
+        const text = ctx.args?.trim() ?? "";
+        if (!text) {
+          return { text: "Usage: /capture-local <note>" };
+        }
+        try {
+          const status = await readIPCRAEStatusSnapshot(config);
+          const policy = evaluateIPCRAEWritePolicy(status, "volatile");
+          if (!policy.allowed) {
+            return { text: policy.reason ?? "IPCRAE write policy blocked." };
+          }
+          const filePath = await writeLocalNote(config.ipcraeRoot, {
+            text,
+            channel: ctx.channel,
+            senderId: ctx.senderId,
+            projectSlug: config.projectSlug,
+          });
+          return { text: `Local note saved to ${filePath}` };
+        } catch (error) {
+          return {
+            text: `Local note failed: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      },
+    });
+
+    api.registerCommand({
+      name: "capture-knowledge",
+      description:
+        "Capture a stable knowledge note into Knowledge/ (prefer /promote-note from local notes).",
+      acceptsArgs: true,
+      handler: async (ctx) => {
+        const text = ctx.args?.trim() ?? "";
+        if (!text) {
+          return { text: "Usage: /capture-knowledge <note>" };
+        }
+        try {
+          const status = await readIPCRAEStatusSnapshot(config);
+          const policy = evaluateIPCRAEWritePolicy(status, "stable");
+          if (!policy.allowed) {
+            return { text: policy.reason ?? "IPCRAE write policy blocked." };
+          }
+          const domain = status.domain ?? config.domain ?? "general";
+          const filePath = await writeKnowledgeNote(config.ipcraeRoot, {
+            text,
+            projectSlug: config.projectSlug,
+            domain,
+            tags: [domain],
+            sources: ["extensions/ipcrae/index.ts"],
+          });
+          return { text: `Knowledge note saved to ${filePath}` };
+        } catch (error) {
+          return {
+            text: `Knowledge capture failed: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      },
+    });
+
+    api.registerCommand({
+      name: "promote-note",
+      description:
+        "Promote a volatile local note into Knowledge/ (explicit volatile -> stable transition).",
+      acceptsArgs: true,
+      handler: async (ctx) => {
+        const localNotePath = ctx.args?.trim() ?? "";
+        if (!localNotePath) {
+          return { text: "Usage: /promote-note <local-note-path>" };
+        }
+        try {
+          const status = await readIPCRAEStatusSnapshot(config);
+          const policy = evaluateIPCRAEWritePolicy(status, "stable");
+          if (!policy.allowed) {
+            return { text: policy.reason ?? "IPCRAE write policy blocked." };
+          }
+          const domain = status.domain ?? config.domain ?? "general";
+          const result = await promoteLocalNoteToKnowledge(config.ipcraeRoot, {
+            localNotePath,
+            projectSlug: config.projectSlug,
+            domain,
+            tags: [domain],
+          });
+          return {
+            text: [
+              "Local note promoted to stable knowledge:",
+              `- source: ${result.sourcePath}`,
+              `- knowledge: ${result.knowledgePath}`,
+            ].join("\n"),
+          };
+        } catch (error) {
+          return {
+            text: `Promote failed: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      },
+    });
+
+    api.registerCommand({
+      name: "ipcrae-sync",
+      description: "Sync project index/tracking/memory artifacts in Projets/<slug>.",
+      acceptsArgs: true,
+      handler: async (ctx) => {
+        const actionText = ctx.args?.trim();
+        const projectSlug = config.projectSlug ?? "openclawIPCRAE";
+        try {
+          const status = await readIPCRAEStatusSnapshot(config);
+          const policy = evaluateIPCRAEWritePolicy(status, "stable");
+          if (!policy.allowed) {
+            return { text: policy.reason ?? "IPCRAE write policy blocked." };
+          }
+          const paths = await syncProjectArtifacts(config.ipcraeRoot, {
+            projectSlug,
+            domain: config.domain,
+            actionText: actionText || undefined,
+          });
+          return {
+            text: [
+              `IPCRAE project synced for ${projectSlug}:`,
+              `- index: ${paths.indexPath}`,
+              `- tracking: ${paths.trackingPath}`,
+              `- memory: ${paths.memoryPath}`,
+            ].join("\n"),
+          };
+        } catch (error) {
+          return {
+            text: `IPCRAE sync failed: ${error instanceof Error ? error.message : String(error)}`,
           };
         }
       },
